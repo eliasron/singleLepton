@@ -1,0 +1,128 @@
+#Set Makefile for the DesySusy ntuple analysis
+#
+# Author: Dirk Kruecker, 10.2.2011
+
+#----------------------- here you can input your files and libraries ----------
+#
+# we compile all *.C and *.cpp defined in SOURCES
+#
+
+  SRCDIR       = ./src
+  OBJDIR       = ./obj
+  BINDIR       = .
+  DEPDIR       = $(OBJDIR)
+  VPATH        = $(SRCDIR):$(OBJDIR):$(BINDIR):$(DEPDIR)
+  ALL          = $(wildcard $(SRCDIR)/*.cpp)
+  ALL         := $(notdir $(ALL))
+  MAINS        = main_RA4b.cpp makeObjects.cpp main_example.cpp
+  SOURCES_LIB  = AnalysisObject.cpp Particle.cpp Electron.cpp Muon.cpp Tau.cpp Jet.cpp GenJet.cpp EventInfo.cpp mt2w_bisect.cpp mt2w_interface.cpp Event.cpp Tools.cpp IsoTrackVeto.cpp
+
+  SOURCES     := $(filter-out $(SOURCES_LIB) $(MAINS),$(ALL))
+
+# with additional libs and includes
+# e.g. MORELIBS = -L/path -lblub
+  MORELIBS = -L./ -lRA4bDict -L/usr/lib64 -lz -L/cvmfs/cms.cern.ch/slc5_amd64_gcc462/external/fastjet/3.0.1/lib -lfastjet
+# e.g. -I/path
+  MOREINCS = -I$(TOOLSDIR) -I/usr/include -I/cvmfs/cms.cern.ch/slc5_amd64_gcc462/external/fastjet/3.0.1/include/
+
+OBJS      = $(notdir $(SOURCES))
+OBJS     := $(OBJS:.C=.o)
+OBJS     := $(OBJS:.cpp=.o)
+
+HEADERS_LIB = $(notdir $(SOURCES_LIB))
+HEADERS_LIB:= $(HEADERS_LIB:.cpp=.h)	
+OBJS_LIB   = $(notdir $(SOURCES_LIB))
+OBJS_LIB   := $(OBJS_LIB:.cpp=_sl.o)	 
+
+SOURCES_MTTOOLS = ./src/mTtools/MT2/mt2_bisect.cpp 
+OBJS_MTTOOLS   := $(SOURCES_MTTOOLS:.cpp=.o)	 
+OBJS_MTTOOLS_LIB   := $(SOURCES_MTTOOLS:.cpp=_sl.o)	 
+
+#------------------------------------------------------------------------------
+
+ifndef ROOTSYS
+	$(error ROOTSYS is not defined!)
+endif
+
+#GET THE BOOST DIR. REQUIRED ON WORKGROUP SERVER
+BOOSTLIB = /usr/include
+ifneq "$(shell find $(BOOSTLIB) -type d -iname boost | wc -l)"  "1"
+$(info "Setting BOOST dir...")
+BOOSTLIB = /afs/desy.de/group/cms/sw/slc5_ia32_gcc434/external/boost/1.44.0-cms/include
+endif
+$(info "Using BOOST: $(BOOSTLIB)")
+
+ROOTLIBS    = `root-config --libs` -lGenVector 
+CXX         = g++ -g3 -O1
+CXXFLAGS    = `root-config --cflags` -I ./  -I ./src -I ./src/CMSSW_5_3_3_patch2/src -I$(BOOSTLIB)
+#CXXFLAGS    = `root-config --cflags` -I ./  -I ./src -I ./src/CMSSW_5_3_3_patch2/src 
+LD          = g++
+LDFLAGS     = `root-config --ldflags`
+
+.SUFFIXES: .cpp .C .o .so
+
+# do we have a 32-bit root?
+BUILDTYPE = $(findstring 64-bit, $(shell file -L ${ROOTSYS}/lib/libCore.so ) )
+# check if we have changed the environment (32/64) and recompile everything
+FILETYPE =  $(findstring 64-bit, $(shell file -L NtupleTools2Dict.o ) )
+ifneq (${BUILDTYPE},${FILETYPE}) 
+$(info Different build-types for ROOT and NtupleTools2Dict. Recompiling all.)
+$(shell rm *.o NtupleTools2Dict.cxx )
+endif
+
+#------------------------------------------------------------------------------
+
+all: objdir MTTOOLS makeObjects
+
+makeObjects: $(OBJS) NtupleTools2Dict.o libRA4bDict.so makeObjects.o
+	@echo $(SOURCES)
+	$(LD) $(LDFLAGS) $(addprefix $(OBJDIR)/, makeObjects.o $(OBJS)) $(ROOTLIBS) $(MORELIBS) -o $@
+	@echo "$@ done"
+
+#Rules for creating a test program
+example: $(OBJS) $(MAINS) NtupleTools2Dict.o libRA4bDict.so
+	$(LD) $(LDFLAGS) $(addprefix $(OBJDIR)/main_example.o $(OBJS)) $(OBJS_MTTOOLS) $(ROOTLIBS) $(MORELIBS) -o $@
+	@echo "$@ done"
+
+#Rules for creating the linked library
+%_sl.o : %.cpp		
+	$(CXX) -fPIC $(MOREINCS) $(CXXFLAGS) $(MORELIBS) -o $(OBJDIR)/$@ -c $<
+NtupleTools2Dict_sl.o: NtupleTools2Dict.cxx
+	 $(CXX) -fPIC $(CXXFLAGS) $(MORELIBS) -D __NTHEADER___ -o $(OBJDIR)/$@ -c $<	
+libRA4bDict.cpp : $(HEADERS_LIB) libRA4bDict_Linkdef.h 
+	rootcint -f $@ -c -I/cvmfs/cms.cern.ch/slc5_amd64_gcc462/external/fastjet/3.0.1/include/ -p  $^ 
+libRA4bDict.so : MTTOOLS $(OBJS_LIB) NtupleTools2Dict_sl.o libRA4bDict_sl.o
+	$(CXX) -shared $(LDFLAGS) $(ROOTLIBS) -L/cvmfs/cms.cern.ch/slc5_amd64_gcc462/external/fastjet/3.0.1/lib -lfastjet -o $@ $(addprefix $(OBJDIR)/,$(OBJS_LIB) NtupleTools2Dict_sl.o libRA4bDict_sl.o)  $(OBJS_MTTOOLS_LIB)
+	@echo "Made library!"
+
+objdir:
+	mkdir -p $(OBJDIR)
+
+NtupleTools2Dict.cxx: NtupleTools2_h.h  Linkdef.h
+		@echo "Generating dictionary $@..."
+		@rootcint -f $@ -c  -p $^
+NtupleTools2Dict.o: NtupleTools2Dict.cxx
+	 $(CXX) $(CXXFLAGS) $(MORELIBS) -D __NTHEADER___ -c $<	
+NtupleTools2_h.h:  NtupleTools2.h
+	touch NtupleTools2_h.h 
+
+MTTOOLS:
+	@echo "Making MTTOOLS..."
+	cd src/mTtools/MT2; make
+	cd src/mTtools/WIMPMASS; make
+
+clean:
+	@rm -f *Dict.* *Dict_* *.so core $(OBJDIR)/*.so $(OBJDIR)/*.o $(DEPDIR)/*.d
+
+#This is the rule for creating the dependency files
+%.d: %.cpp
+	$(CXX) $(CXXFLAGS) $(MORELIBS) $(MOREINCS) -MM -MF $(DEPDIR)/$@ $<
+%.d: %.C
+	$(CXX) $(CXXFLAGS) $(MORELIBS) $(MOREINCS) -MM -MF $(DEPDIR)/$@ $<
+
+%.o: %.cpp %.d
+		$(CXX) $(CXXFLAGS) $(ROOTLIBS) $(MORELIBS) $(MOREINCS) -c $< -o $(OBJDIR)/$@
+%.o: %.C %.d
+		$(CXX) $(CXXFLAGS) $(ROOTLIBS) $(MORELIBS) $(MOREINCS) -c $< -o  $(OBJDIR)/$@
+
+-include $(addprefix $(DEPDIR)/,$(ALL:%.cpp=%.d))
